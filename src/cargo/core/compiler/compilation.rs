@@ -11,6 +11,8 @@ use crate::core::compiler::CompileKind;
 use crate::core::{Edition, InternedString, Package, PackageId, Target};
 use crate::util::{self, join_paths, process, rustc::Rustc, CargoResult, Config, ProcessBuilder};
 
+use git2;
+
 pub struct Doctest {
     /// The package being doc-tested.
     pub package: Package,
@@ -244,6 +246,35 @@ impl<'cfg> Compilation<'cfg> {
         let cargo_exe = self.config.cargo_exe()?;
         cmd.env(crate::CARGO_ENV, cargo_exe);
 
+        let (git_commit, git_status) = {
+            let mut git_commit: Option<String> = None;
+            let mut git_status: Option<String> = None;
+
+            if let Ok(repo) = git2::Repository::discover(pkg.root()) {
+                if let Ok(repo_desc) = repo
+                    .describe(git2::DescribeOptions::default().show_commit_oid_as_fallback(true))
+                {
+                    git_commit = Some(repo_desc.format(None).unwrap_or(String::new()));
+                }
+
+                if let Some(_) = repo.workdir() {
+                    let mut repo_opts = git2::StatusOptions::new();
+                    repo_opts.include_ignored(false);
+                    repo_opts.show(git2::StatusShow::Workdir);
+                    if let Ok(statuses) = repo.statuses(Some(&mut repo_opts)) {
+                        println!("statuses: {:?}", statuses.len());
+                        if statuses.is_empty() {
+                            git_status = Some(String::new());
+                        } else {
+                            git_status = Some(String::from("dirty"));
+                        }
+                    }
+                }
+            }
+
+            (git_commit, git_status)
+        };
+
         // When adding new environment variables depending on
         // crate properties which might require rebuild upon change
         // consider adding the corresponding properties to the hash
@@ -271,6 +302,8 @@ impl<'cfg> Compilation<'cfg> {
                 metadata.repository.as_ref().unwrap_or(&String::new()),
             )
             .env("CARGO_PKG_AUTHORS", &pkg.authors().join(":"))
+            .env("CARGO_GIT_STATUS", git_status.unwrap_or(String::new()))
+            .env("CARGO_GIT_COMMIT", git_commit.unwrap_or(String::new()))
             .cwd(pkg.root());
         Ok(cmd)
     }
